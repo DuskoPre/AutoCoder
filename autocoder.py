@@ -1,3 +1,6 @@
+#  Copyright (c) 19.05.2024 [D. P.] aka duskop; after the call a day after from a Japanese IPO-agency, i'm adding my patreon ID: https://www.patreon.com/florkz_com
+#  All rights reserved.
+
 import os
 import time
 import sys
