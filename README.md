@@ -1,0 +1,1 @@
+recommended ollama with docker
