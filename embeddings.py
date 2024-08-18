@@ -21,6 +21,7 @@ REPOSITORY_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), "pla
 class Embeddings:
     def __init__(self, workspace_path: str):
         self.workspace_path = workspace_path
+        self.document_embeddings = {}  # Initialize document_embeddings as an empty dictionary
 
         # Initialize Sentence-BERT model
         self.model = SentenceTransformer('all-MiniLM-L6-v2')
