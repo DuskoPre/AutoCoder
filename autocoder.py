@@ -34,8 +34,8 @@ OLLAMA_API_URL = 'http://localhost:11434/api'
 
 if len(sys.argv) > 1:
     OBJECTIVE = sys.argv[1]
-elif os.path.exists(os.path.join(current_directory, "objective3.txt")):
-    with open(os.path.join(current_directory, "objective3.txt")) as f:
+elif os.path.exists(os.path.join(current_directory, "objective.txt")):
+    with open(os.path.join(current_directory, "objective.txt")) as f:
         OBJECTIVE = f.read()
 
 assert OBJECTIVE, "OBJECTIVE missing"
