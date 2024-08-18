@@ -10,13 +10,17 @@ import json
 import subprocess
 import platform
 import logging
-from embeddingsB import Embeddings
+from embeddings import Embeddings
 import requests
+import threading
+import psutil
 
 # Set Variables
 load_dotenv()
 current_directory = os.getcwd()
 os_version = platform.release()
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 openai_calls_retried = 0
 max_openai_calls_retries = 3
@@ -24,14 +28,14 @@ api_calls_retried = 0
 max_api_calls_retries = 3
 
 # Set Ollama API model to use
-#OLLAMA_API_MODEL = 'llama3:70b-instruct-q4_K_M'
-OLLAMA_API_MODEL = 'llama3:instruct'
+OLLAMA_API_MODEL = 'deepseek-coder-v2:16b-lite-instruct-fp16'
+OLLAMA_HELPER_API_MODEL = 'phi3:14b-medium-128k-instruct-fp16'
 OLLAMA_API_URL = 'http://localhost:11434/api'
 
 if len(sys.argv) > 1:
     OBJECTIVE = sys.argv[1]
-elif os.path.exists(os.path.join(current_directory, "objective.txt")):
-    with open(os.path.join(current_directory, "objective.txt")) as f:
+elif os.path.exists(os.path.join(current_directory, "objective3.txt")):
+    with open(os.path.join(current_directory, "objective3.txt")) as f:
         OBJECTIVE = f.read()
 
 assert OBJECTIVE, "OBJECTIVE missing"
@@ -54,7 +58,6 @@ def print_char_by_char(text, delay=0.00001, chars_at_once=3):
         print(chunk, end='', flush=True)
         time.sleep(delay)
     print()
-# Remove the previous openai_call function
 
 def openai_call(prompt: str, model: str = OLLAMA_API_MODEL, temperature: float = 0.5, max_tokens: int = 100, format: str = "json", stream: bool = False):
     global api_calls_retried
@@ -169,38 +172,68 @@ def split_code_into_chunks(file_path: str, chunk_size: int = 50) -> List[Dict[st
         chunks.append(chunk)
     return chunks
 
+def read_md_files_in_directory(directory):
+    md_files_content = {}
+    for filename in os.listdir(directory):
+        if filename.endswith(".md"):
+            filepath = os.path.join(directory, filename)
+            with open(filepath, 'r') as file:
+                md_files_content[filename] = file.read()
+    return md_files_content
+
+def decode_json_string(json_string):
+    """Convert a JSON-encoded string to plain text."""
+    return json_string.encode().decode('unicode_escape')
+
+def extract_code_from_json(agent_output: str):
+    """Extract the 'code' field from the JSON response and decode it."""
+    try:
+        # Parse the JSON response
+        response_dict = json.loads(agent_output)
+        # Extract and decode the 'code' field
+        if "code" in response_dict:
+            return decode_json_string(response_dict["code"])
+        else:
+            raise ValueError("The JSON does not contain a 'code' field.")
+    except json.JSONDecodeError:
+        raise ValueError("Failed to parse JSON. The agent output is not valid JSON.")
+
+def monitor_resources():
+    while True:
+        cpu_usage = os.getloadavg()[0]  # 1 minute load average
+        memory_usage = psutil.virtual_memory().percent
+        print(f"CPU usage: {cpu_usage}%, Memory usage: {memory_usage}%")
+        time.sleep(60)  # Monitor every 60 seconds
+        
+# Global template definition
+prompt_template = """{{ if .System }}{{ .System }}
+
+{{ end }}{{ if .Prompt }}User: {{ .Prompt }}
+
+{{ end }}Assistant:{{ .Response }}"""
+
+prompt_template_helper = """{{ if .System }}<|system|>
+{{ .System }}<|end|>
+{{ end }}{{ if .Prompt }}<|user|>
+{{ .Prompt }}<|end|>
+{{ end }}<|assistant|>
+{{ .Response }}<|end|>"""
 
 # Example usage of OpenAI call
 system_message = "You are a helpful assistant."
 prompt_message = "Tell me a joke about programming."
 response_format = "json"
 
-prompt_template = """{{ if .System }}system
+formatted_prompt = prompt_template.replace("{{ .System }}", system_message).replace("{{ .Prompt }}", prompt_message)
 
-{{ .System }}{{ end }}{{ if .Prompt }}user
-
-{{ .Prompt }}{{ end }}assistant
-
-{{ .Response }}"""
-
-formatted_prompt = prompt_template.replace("{{ .System }}", system_message).replace("{{ .Prompt }}", prompt_message).replace("{{ .Response }}", "")
-
-response = openai_call(formatted_prompt, format=response_format, stream=False)  # Ensure streaming is off
+response = openai_call(formatted_prompt, format=response_format, stream=False)
 print(response)
-
 
 ## TASKS AGENTS ##
 
 ## End of Helper/Utility functions ##
 
 def code_tasks_initializer_agent(objective: str):
-    prompt_template = """{{ if .System }}system
-
-{{ .System }}{{ end }}{{ if .Prompt }}user
-
-{{ .Prompt }}{{ end }}assistant
-
-{{ .Response }}"""
     
     system_message = """You are an AGI agent responsible for creating a detailed JSON checklist of tasks that will guide other AGI agents to complete a given programming objective. Your task is to analyze the provided objective and generate a well-structured checklist with a clear starting point and end point, as well as tasks broken down to be very specific, clear, and executable by other agents without the context of other tasks.
     
@@ -272,13 +305,6 @@ The tasks will be executed by either of the three agents: command_executor_agent
     return openai_call(prompt, temperature=0, max_tokens=2000)
 
 def code_tasks_refactor_agent(objective: str, task_list_json):
-    prompt_template = """{{ if .System }}system
-
-{{ .System }}{{ end }}{{ if .Prompt }}user
-
-{{ .Prompt }}{{ end }}assistant
-
-{{ .Response }}"""
 
     system_message = """You are an AGI tasks_refactor_agent responsible for adapting a task list generated by another agent to ensure the tasks are compatible with the current AGI agents. Your goal is to analyze the task list and make necessary modifications so that the tasks can be executed by the agents listed below
 
@@ -337,13 +363,6 @@ def code_tasks_refactor_agent(objective: str, task_list_json):
     return openai_call(prompt, temperature=0, max_tokens=2000)
 
 def code_tasks_details_agent(objective: str, task_list_json):
-    prompt_template = """{{ if .System }}system
-
-{{ .System }}{{ end }}{{ if .Prompt }}user
-
-{{ .Prompt }}{{ end }}assistant
-
-{{ .Response }}"""
 
     system_message = """You are an AGI agent responsible for improving a list of tasks in JSON format and adding ALL the necessary details to each task. These tasks will be executed individually by agents that have no idea about other tasks or what code exists in the codebase. It is FUNDAMENTAL that each task has enough details so that an individual isolated agent can execute. The metadata of the task is the only information the agents will have.
 
@@ -366,13 +385,6 @@ def code_tasks_details_agent(objective: str, task_list_json):
     return openai_call(prompt, temperature=0.7, max_tokens=2000)
 
 def code_tasks_context_agent(objective: str, task_list_json):
-    prompt_template = """{{ if .System }}system
-
-{{ .System }}{{ end }}{{ if .Prompt }}user
-
-{{ .Prompt }}{{ end }}assistant
-
-{{ .Response }}"""
 
     system_message = """You are an AGI agent responsible for improving a list of tasks in JSON format and adding ALL the necessary context to it. These tasks will be executed individually by agents that have no idea about other tasks or what code exists in the codebase. It is FUNDAMENTAL that each task has enough context so that an individual isolated agent can execute. The metadata of the task is the only information the agents will have.
 
@@ -399,13 +411,6 @@ def code_tasks_context_agent(objective: str, task_list_json):
     return openai_call(prompt, temperature=0.7, max_tokens=2000)
 
 def task_assigner_recommendation_agent(objective: str, task: str):
-    prompt_template = """{{ if .System }}system
-
-{{ .System }}{{ end }}{{ if .Prompt }}user
-
-{{ .Prompt }}{{ end }}assistant
-
-{{ .Response }}"""
 
     system_message = """You are an AGI agent responsible for providing recommendations on which agent should be used to handle a specific task. Analyze the provided major objective of the project and a single task from the JSON checklist generated by the previous agent, and suggest the most appropriate agent to work on the task."""
 
@@ -432,13 +437,6 @@ def task_assigner_recommendation_agent(objective: str, task: str):
     return openai_call(prompt, temperature=0.5, max_tokens=2000)
 
 def task_assigner_agent(objective: str, task: str, recommendation: str):
-    prompt_template = """{{ if .System }}system
-
-{{ .System }}{{ end }}{{ if .Prompt }}user
-
-{{ .Prompt }}{{ end }}assistant
-
-{{ .Response }}"""
 
     system_message = """You are an AGI agent responsible for choosing the best agent to work on a given task. Your goal is to analyze the provided major objective of the project and a single task from the JSON checklist generated by the previous agent, and choose the best agent to work on the task."""
 
@@ -464,13 +462,6 @@ def task_assigner_agent(objective: str, task: str, recommendation: str):
     return openai_call(prompt, temperature=0, max_tokens=2000)
 
 def command_executor_agent(task: str, file_path: str):
-    prompt_template = """{{ if .System }}system
-
-{{ .System }}{{ end }}{{ if .Prompt }}user
-
-{{ .Prompt }}{{ end }}assistant
-
-{{ .Response }}"""
 
     system_message = """You are an AGI agent responsible for executing a given command on the {os_version} OS. Your goal is to analyze the provided major objective of the project and a single task from the JSON checklist generated by the previous agent, and execute the command on the {os_version} OS."""
 
@@ -485,15 +476,8 @@ def command_executor_agent(task: str, file_path: str):
     return openai_call(prompt, temperature=0, max_tokens=2000)
 
 def code_writer_agent(task: str, isolated_context: str, context_code_chunks):
-    prompt_template = """{{ if .System }}system
 
-{{ .System }}{{ end }}{{ if .Prompt }}user
-
-{{ .Prompt }}{{ end }}assistant
-
-{{ .Response }}"""
-
-    system_message = """You are an AGI agent responsible for writing code to accomplish a given task. Your goal is to analyze the provided major objective of the project and a single task from the JSON checklist generated by the previous agent, and write the necessary code to complete the task."""
+    system_message = """You are an AGI agent responsible for writing code to accomplish a given task. Your goal is to analyze the provided major objective of the project and a single task from the JSON checklist generated by the previous agent, and write the necessary code to complete the task in format: {"code": "<actual Python code here>"}"""
 
     prompt_message = f"""The current task is: {task}
 
@@ -512,13 +496,6 @@ Based on the task and objective, write the appropriate code to achieve the task.
     return openai_call(prompt, temperature=0, max_tokens=2000)
 
 def code_refactor_agent(task_description: str, existing_code_snippet: str, context_chunks, isolated_context: str):
-    prompt_template = """{{ if .System }}system
-
-{{ .System }}{{ end }}{{ if .Prompt }}user
-
-{{ .Prompt }}{{ end }}assistant
-
-{{ .Response }}"""
 
     system_message = """You are an AGI agent responsible for refactoring code to accomplish a given task. Your goal is to analyze the provided major objective of the project, the task descriptionm and refactor the code accordingly."""
 
@@ -541,18 +518,16 @@ def code_refactor_agent(task_description: str, existing_code_snippet: str, conte
     return openai_call(prompt, temperature=0, max_tokens=2000)
 
 def file_management_agent(objective: str, task: str, current_directory_files: str, file_path: str):
-    prompt_template = """{{ if .System }}system
 
-{{ .System }}{{ end }}{{ if .Prompt }}user
-
-{{ .Prompt }}{{ end }}assistant
-
-{{ .Response }}"""
+    # Read Markdown files
+    #md_files_content = read_md_files_in_directory('.')
+    #md_files_info = "\n\n".join([f"{filename}: {content}" for filename, content in md_files_content.items()])
 
     system_message = """You are an AGI agent responsible for managing files in a software project. Your goal is to analyze the provided major objective of the project and a single task from the JSON checklist generated by the previous agent, and determine the appropriate file path and name for the generated code."""
 
     prompt_message = f"""The overall objective is: {objective}
     The current task is: {task}
+    
     Specified file path (relative path from the current dir): {file_path}
 
     Make the file path adapted for the current directory files. The current directory files are: {current_directory_files}. Assume this file_path will be interpreted from the root path of the directory.
@@ -562,20 +537,15 @@ def file_management_agent(objective: str, task: str, current_directory_files: st
     BE VERY SPECIFIC WITH THE FILES, AVOID FILE DUPLICATION, AVOID SPECIFYING THE SAME FILE NAME UNDER DIFFERENT FOLDERS, ETC.
 
     Based on the task, determine the file path and name for the generated code. Return the file path and name as a JSON output with the following format: {{"file_path": "file_path_and_name"}}. ONLY return JSON output:"""
-
+    
+    #Markdown files info: {md_files_info}
+    
     prompt = prompt_template.replace("{{ .System }}", system_message).replace("{{ .Prompt }}", prompt_message).replace("{{ .Response }}", "")
 
     print("file_management_agent")
     return openai_call(prompt, temperature=0, max_tokens=2000)
 
 def code_relevance_agent(objective: str, task_description: str, code_chunk: str):
-    prompt_template = """{{ if .System }}system
-
-{{ .System }}{{ end }}{{ if .Prompt }}user
-
-{{ .Prompt }}{{ end }}assistant
-
-{{ .Response }}"""
 
     system_message = """You are an AGI agent responsible for evaluating the relevance of a code chunk in relation to a given task. Your goal is to analyze the provided major objective of the project, the task description, and the code chunk, and assign a relevance score from 0 to 10, where 0 is completely irrelevant and 10 is highly relevant."""
 
@@ -599,6 +569,10 @@ def code_relevance_agent(objective: str, task_description: str, code_chunk: str)
 print_colored_text(f"****Objective****", color='green')
 print_char_by_char(OBJECTIVE, 0.00001, 10)
 
+# Monitor system resources
+resource_monitor_thread = threading.Thread(target=monitor_resources, daemon=True)
+resource_monitor_thread.start()
+
 # Create the tasks
 print_colored_text("*****Working on tasks*****", "red")
 print_colored_text(" - Creating initial tasks", "yellow")
@@ -614,8 +588,46 @@ print()
 print_colored_text("*****TASKS*****", "green")
 print_char_by_char(task_agent_output, 0.00000001, 10)
 
+# Function to call coderllama for feedback
+def coder_helper_llm_call(prompt: str, model: str = OLLAMA_HELPER_API_MODEL, temperature: float = 0.5, max_tokens: int = 100, format: str = "json", stream: bool = False):
+    global api_calls_retried
+
+    headers = {
+        'Content-Type': 'application/json'
+    }
+    data = {
+        "model": model,  # Use coder-helper-LLM model
+        "prompt": prompt,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "format": format,
+        "stream": stream
+    }
+
+    try:
+        response = requests.post(f'{OLLAMA_API_URL}/generate', headers=headers, json=data)
+        response.raise_for_status()
+        api_calls_retried = 0
+
+        try:
+            # Try to parse JSON response
+            json_response = response.json()
+            return json_response.get('response', '').strip()
+        except json.JSONDecodeError as json_error:
+            return f"Error decoding JSON response: {str(json_error)}"
+
+    except requests.exceptions.RequestException as e:
+        # Retry on error
+        if api_calls_retried < max_api_calls_retries:
+            api_calls_retried += 1
+            print(f"Error calling API. Retrying {api_calls_retried} of {max_api_calls_retries}...")
+            return coder_helper_llm_call(prompt, model, temperature, max_tokens, format, stream)
+        else:
+            logging.error(f"Error calling API: {str(e)}")
+            return f"Error calling API: {str(e)}"
+
 # Task list
-task_json = json.loads(task_agent_output)
+task_json = json.loads(task_agent_output) #line 611
 
 embeddings = Embeddings(current_directory)
 
@@ -634,31 +646,63 @@ for task in task_json["tasks"]:
     print_colored_text("*****TASK CONTEXT*****", "yellow")
     print_char_by_char(task_isolated_context)
 
+    # Function to get task feedback using coder-helper-LLM
+    def get_task_feedback_using_llm(task_description):
+        system_message = "Provide feedback on the following task description:"
 
-    # HUMAN FEEDBACK
-    # Uncomment below to enable human feedback before each task. This can be used to improve the quality of the tasks,
-    # skip tasks, etc. I believe it may be very relevant in future versions that may have more complex tasks and could
-    # allow a ton of automation when working on large projects.
-    #
-    # Get user input as a feedback to the task_description
-    # print_colored_text("*****TASK FEEDBACK*****", "yellow")
-    # user_input = input("\n>:")
-    # task_description = task_human_input_agent(task_description, user_input)
-    # if task_description == "<IGNORE_TASK>":
-    #     continue
-    # print_colored_text("*****IMPROVED TASK*****", "green")
-    # print_char_by_char(task_description)
+        params = {
+            "stop": [
+                "### Instruction:",
+                "### Response:"
+            ]
+        }
+
+        prompt = prompt_template_helper.replace("{{ .System }}", system_message).replace("{{ .Prompt }}", task_description + "\n\nFeedback:")
+
+        # Make the call to the coder-helper LLM
+        response = coder_helper_llm_call(prompt)
+        return response
+
+    # Code to replace the user input section with coderllama feedback
+    print_colored_text("*****TASK FEEDBACK*****", "yellow")
+    helper_input = get_task_feedback_using_llm(task_description)
+    #task_description = get_task_feedback_using_llm(task_description, helper_input)
+    if task_description == "<IGNORE_TASK>":
+        continue
+    print_colored_text("*****IMPROVED TASK*****", "green")
+    print("helper_input")
+    print_char_by_char(task_description)
     
     # Assign the task to an agent
-    task_assigner_recommendation = task_assigner_recommendation_agent(OBJECTIVE, task_description)
+    task_assigner_recommendation = task_assigner_recommendation_agent(OBJECTIVE, task_description) #line 658
     task_agent_output = task_assigner_agent(OBJECTIVE, task_description, task_assigner_recommendation)
 
     print_colored_text("*****ASSIGN*****", "yellow")
     print_char_by_char(task_agent_output)
 
-    chosen_agent = json.loads(task_agent_output)["agent"]
+    # Debugging: Print the output to understand its structure
+    print("Task agent output:", task_agent_output)
+    
+    # Initialize chosen_agent to None or an appropriate default value
+    chosen_agent = None
+    
+    # Check if 'agent' key exists in the parsed JSON
+    try:
+        task_agent_data = json.loads(task_agent_output)
+        if 'agent' in task_agent_data:
+            chosen_agent = task_agent_data["agent"]
+        else:
+            raise KeyError("Key 'agent' not found in the task agent output.")
+    except json.JSONDecodeError as e:
+        print(f"Error decoding JSON from task agent output: {e}")
+        print(f"Failed JSON string: {task_agent_output}")  # This will help in identifying the issue
+    except KeyError as e:
+        print(f"Key error: {e}")
 
     if chosen_agent == "command_executor_agent":
+        current_directory_files = execute_command_string("ls")
+        file_management_output = file_management_agent(OBJECTIVE, task_description, current_directory_files, task["file_path"])
+        file_path = json.loads(file_management_output)["file_path"]
         command_executor_output = command_executor_agent(task_description, task["file_path"])
         print_colored_text("*****COMMAND*****", "green")
         print_char_by_char(command_executor_output)
@@ -681,16 +725,19 @@ for task in task_json["tasks"]:
 
             code_writer_output = code_writer_agent(task_description, task_isolated_context, relevant_chunks)
             
-            print_colored_text("*****CODE*****", "green")
-            print_char_by_char(code_writer_output)
+            # Extract and decode the plain text code from the JSON output
+            plain_text_code = extract_code_from_json(code_writer_output)
 
-            # Save the generated code to the file the agent selected
-            save_code_to_file(code_writer_output, file_path)
+            print_colored_text("*****CODE*****", "green")
+            print_char_by_char(plain_text_code)
+
+            # Save the decoded plain text code to the file
+            save_code_to_file(plain_text_code, file_path)
 
         elif chosen_agent == "code_refactor_agent":
             # The code refactor agent works with multiple agents:
-            # For each task, the file_management_agent is used to select the file to edit.Then, the 
-            # code_relevance_agent is used to select the relevant code chunks from that filewith the 
+            # For each task, the file_management_agent is used to select the file to edit. Then, the 
+            # code_relevance_agent is used to select the relevant code chunks from that file with the 
             # goal of finding the code chunk that is most relevant to the task description. This is 
             # the code chunk that will be edited. Finally, the code_refactor_agent is used to edit 
             # the code chunk.
