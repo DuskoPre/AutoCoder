@@ -1,4 +1,4 @@
-# **Hub2Flow 🤖**
+# **Hub2Flow 🤖  (Autocoder V3)**
 
 **Autonomous AI coding agent** with adaptive veto gates, semantic memory, and a Gradio dashboard.  
  Give it an objective — it writes, runs, type-checks, formats, and delivers working Python code.
